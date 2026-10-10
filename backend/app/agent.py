@@ -8,6 +8,7 @@ import re
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+from .llm import classify_error, get_llm_client
 from .prompts import SYSTEM_PROMPT
 from .security import has_credentials, hostname_is_blocked, is_valid_scheme, normalize_url
 
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 MAX_ROUNDS = 4
 FETCH_TRUNCATE = 6000
 NOT_FOUND = "I couldn't find this on the website"
+THINK_OPEN = re.compile(r"<think\s*>", re.IGNORECASE)
+THINK_CLOSE = re.compile(r"</think\s*>", re.IGNORECASE)
 
 TOOLS = [
     {"type": "function", "function": {
@@ -31,27 +34,80 @@ TOOLS = [
 ]
 
 
+class ThinkStripper:
+    """Stateful stripper for <think>...</think> blocks, tolerant of chunk splits."""
+
+    def __init__(self):
+        self.in_think = False
+        self._hold = ""
+
+    def feed(self, text: str) -> str:
+        rest = self._hold + (text or "")
+        self._hold = ""
+        out: List[str] = []
+        while rest:
+            if self.in_think:
+                m = THINK_CLOSE.search(rest)
+                if not m:
+                    return "".join(out)  # drop remainder, still thinking
+                rest = rest[m.end():]
+                self.in_think = False
+            else:
+                mo = THINK_OPEN.search(rest)
+                mc = THINK_CLOSE.search(rest)
+                if mc and (not mo or mc.start() < mo.start()):
+                    rest = rest[:mc.start()] + rest[mc.end():]  # stray close: drop
+                    continue
+                if not mo:
+                    # hold back a possible split-tag tail ("<th" + "ink>...")
+                    k = rest.rfind("<")
+                    if k != -1 and ">" not in rest[k:]:
+                        out.append(rest[:k])
+                        self._hold = rest[k:]
+                    else:
+                        out.append(rest)
+                    break
+                out.append(rest[:mo.start()])
+                rest = rest[mo.end():]
+                self.in_think = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Emit any held text at end of stream (dropped if inside unclosed think)."""
+        hold, self._hold = self._hold, ""
+        return "" if self.in_think else hold
+
+
+def message_text(msg: Any) -> str:
+    """Assistant content only. Reasoning/thinking fields are never treated as answer text."""
+    content = getattr(msg, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # some providers return content blocks
+        return "".join(getattr(b, "text", "") or "" for b in content
+                       if getattr(b, "type", "text") in ("text", "output_text"))
+    return ""
+
+
 class SiteAskAgent:
-    def __init__(self, store, site_id: str, site_url: str, api_key: str,
-                 model: str, base_url: str = "https://openrouter.ai/api/v1",
+    def __init__(self, store, site_id: str, site_url: str, model: Optional[str] = None,
+                 api_key: Optional[str] = None, base_url: Optional[str] = None,
                  client_factory: Optional[Callable[[], Any]] = None):
+        # Model ID is centralized in settings; an explicit model only overrides (tests).
+        if model is None:
+            from .config import get_settings
+
+            model = get_settings().LLM_MODEL
         self.store = store
         self.site_id = site_id
         self.site_url = site_url
-        self.api_key = api_key
         self.model = model
-        self.base_url = base_url
         self._client_factory = client_factory
-        self._client = None
 
     def _client_or_create(self):
         if self._client_factory is not None:
             return self._client_factory()
-        if self._client is None:
-            from openai import AsyncOpenAI
-
-            self._client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
-        return self._client
+        return get_llm_client()  # shared process-wide client
 
     # ---- tools ----
     def search_site(self, query: str) -> List[Dict[str, Any]]:
@@ -105,39 +161,51 @@ class SiteAskAgent:
             msgs.append({"role": role, "content": content})
         return msgs
 
-    async def _chat(self, messages: List[Dict], tools=None, stream: bool = False, retry: bool = True):
+    async def _chat(self, messages: List[Dict], tools=None, stream: bool = False):
+        """One LLM call with at most one retry for transient errors only."""
         client = self._client_or_create()
         kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
         if tools is not None:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        if not stream:
-            kwargs["temperature"] = 0.2
         try:
             if stream:
                 return await client.chat.completions.create(stream=True, **kwargs)
             return await client.chat.completions.create(**kwargs)
         except Exception as e:
-            if retry:
-                await asyncio.sleep(1)
-                try:
-                    if stream:
-                        return await client.chat.completions.create(stream=True, **kwargs)
-                    return await client.chat.completions.create(**kwargs)
-                except Exception as e2:
-                    raise e2
-            raise e
+            user_msg, retryable = classify_error(e)
+            logger.warning("LLM call failed (%s, retryable=%s): %s",
+                           type(e).__name__, retryable, _short_error(e))
+            if not retryable:
+                raise _AgentError(user_msg)
+            await asyncio.sleep(1)
+            try:
+                if stream:
+                    return await client.chat.completions.create(stream=True, **kwargs)
+                return await client.chat.completions.create(**kwargs)
+            except Exception as e2:
+                user_msg2, _ = classify_error(e2)
+                logger.warning("LLM retry failed (%s)", type(e2).__name__)
+                raise _AgentError(user_msg2)
 
     def _extract_tool_calls(self, message) -> List[Dict[str, Any]]:
+        """Safely parse tool calls; malformed args or unknown shapes are skipped."""
         calls = getattr(message, "tool_calls", None) or []
+        if not isinstance(calls, (list, tuple)):
+            return []
         out = []
         for c in calls:
             try:
-                fn = c.function.name
-                args = json.loads(c.function.arguments or "{}")
+                fn = getattr(getattr(c, "function", None), "name", "")
+                raw = getattr(getattr(c, "function", None), "arguments", "") or "{}"
+                args = json.loads(raw)
+                if not isinstance(args, dict):
+                    continue
+                if not fn:
+                    continue
             except Exception:
                 continue
-            out.append({"id": getattr(c, "id", ""), "name": fn, "args": args})
+            out.append({"id": getattr(c, "id", "") or "", "name": fn, "args": args})
         return out
 
     async def answer_stream(
@@ -153,11 +221,15 @@ class SiteAskAgent:
             for round_no in range(MAX_ROUNDS):
                 try:
                     resp = await self._chat(messages, tools=TOOLS)
-                except Exception as e:
-                    logger.error("LLM error: %s", e)
-                    yield {"type": "error", "message": "The AI service is unavailable right now. Please try again."}
+                except _AgentError as e:
+                    yield {"type": "error", "message": str(e)}
                     return
-                msg = resp.choices[0].message
+                try:
+                    msg = resp.choices[0].message
+                except Exception:
+                    yield {"type": "error",
+                           "message": "The AI service returned a bad response. Please try again."}
+                    return
                 calls = self._extract_tool_calls(msg)
                 # Grounding fallback: first round with no tool call -> run search ourselves
                 if not calls and round_no == 0:
@@ -166,12 +238,26 @@ class SiteAskAgent:
                     tool_text = self._format_chunks(chunks, question)
                     for c in chunks:
                         used.setdefault(c.get("url", ""), c.get("title", ""))
-                    messages.append({"role": "assistant", "content": msg.content or ""})
+                    messages.append({"role": "assistant", "content": message_text(msg)})
                     messages.append({"role": "user", "content": tool_text})
                     continue
                 if not calls:
-                    # final answer available (non-stream path fallback)
-                    text = (msg.content or "").strip() or NOT_FOUND
+                    text = message_text(msg).strip()
+                    if not text:
+                        # Empty generation (e.g. reasoning-only pass): retry once.
+                        try:
+                            resp = await self._chat(messages, tools=TOOLS)
+                            msg = resp.choices[0].message
+                            text = message_text(msg).strip()
+                        except _AgentError as e:
+                            yield {"type": "error", "message": str(e)}
+                            return
+                        except Exception:
+                            text = ""
+                        if not text:
+                            yield {"type": "error", "message":
+                                   "The AI service returned an empty response. Please try again."}
+                            return
                     for tok in _split_tokens(text):
                         yield {"type": "token", "text": tok}
                     yield {"type": "sources", "sources": [
@@ -179,7 +265,7 @@ class SiteAskAgent:
                     yield {"type": "done"}
                     return
                 # execute tools
-                messages.append({"role": "assistant", "content": msg.content or "",
+                messages.append({"role": "assistant", "content": message_text(msg),
                                  "tool_calls": [{"id": c["id"], "type": "function",
                                                  "function": {"name": c["name"],
                                                               "arguments": json.dumps(c["args"])}} for c in calls]})
@@ -207,24 +293,53 @@ class SiteAskAgent:
                 "Answer the original question now using ONLY the retrieved content above. "
                 "If it is not there, say exactly: \"I couldn't find this on the website\" "
                 "and suggest which page might have it.")})
-            try:
-                stream_resp = await self._chat(messages, stream=True)
-                async for chunk in stream_resp:
-                    try:
-                        delta = chunk.choices[0].delta.content or ""
-                    except Exception:
-                        delta = ""
-                    if delta:
-                        yield {"type": "token", "text": delta}
-            except Exception as e:
-                logger.error("Stream error: %s", e)
-                yield {"type": "error", "message": "Streaming failed. Please try again."}
+            streamed_ok, final_events = await self._stream_final(messages)
+            for ev in final_events:
+                yield ev
+            if not streamed_ok:  # error already yielded
                 return
             yield {"type": "sources", "sources": [{"url": u, "title": t} for u, t in used.items() if u]}
             yield {"type": "done"}
-        except Exception as e:
+        except Exception:
             logger.exception("agent failure")
             yield {"type": "error", "message": "Something went wrong. Please try again."}
+
+    async def _stream_final(self, messages: List[Dict]) -> tuple[bool, List[Dict[str, Any]]]:
+        """Stream ONLY final answer content as token events. Returns (ok, events).
+        Reasoning fields/tags are never forwarded. Never returns an empty answer:
+        an empty generation is retried once, then becomes a friendly error event."""
+        for attempt in (0, 1):
+            try:
+                stream_resp = await self._chat(messages, stream=True)
+            except _AgentError as e:
+                return False, [{"type": "error", "message": str(e)}]
+            stripper = ThinkStripper()
+            events: List[Dict[str, Any]] = []
+            try:
+                async for chunk in stream_resp:
+                    try:
+                        delta = getattr(chunk.choices[0].delta, "content", None) or ""
+                    except Exception:
+                        delta = ""
+                    # NOTE: delta.reasoning / reasoning_content deliberately ignored.
+                    text = stripper.feed(delta)
+                    if text:
+                        events.append({"type": "token", "text": text})
+            except _AgentError as e:
+                return False, [{"type": "error", "message": str(e)}]
+            except Exception:
+                logger.exception("stream read failed")
+                return False, [{"type": "error",
+                                "message": "Streaming failed. Please try again."}]
+            tail = stripper.flush()
+            if tail:
+                events.append({"type": "token", "text": tail})
+            if events:
+                return True, events
+            logger.warning("empty streamed answer (attempt %d)", attempt)
+            # empty generation: retry once, then friendly error — never an empty answer
+        return False, [{"type": "error",
+                        "message": "The AI service returned an empty response. Please try again."}]
 
     def _format_chunks(self, chunks: List[Dict[str, Any]], query: str) -> str:
         if not chunks:
@@ -236,6 +351,15 @@ class SiteAskAgent:
                          f"{(c.get('text','') or '')[:1500]}")
         parts.append("\n</retrieved_content>")
         return "\n".join(parts)
+
+
+class _AgentError(Exception):
+    """User-safe, pre-classified LLM failure (message is safe to stream to clients)."""
+
+
+def _short_error(e: BaseException) -> str:
+    s = str(e)
+    return s[:300]
 
 
 def _split_tokens(text: str) -> List[str]:

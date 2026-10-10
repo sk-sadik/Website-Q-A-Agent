@@ -12,8 +12,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     OPENROUTER_API_KEY: str = ""
-    LLM_MODEL: str = "anthropic/claude-sonnet-4.5"
+    LLM_MODEL: str = "apodex/apodex-1.1-mini:free"
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_TIMEOUT_S: float = 60.0
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     MAX_PAGES: int = 30
     MAX_DEPTH: int = 2

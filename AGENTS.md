@@ -1,13 +1,14 @@
 # AGENTS.md — working in this repo
 
 ## Layout
-- `backend/app/`: `main.py` (app+CORS+routers), `config.py` (env, `get_settings()`),
-  `models.py` (Pydantic v2 schemas), `security.py` (normalize/SSRF/rate-limit),
-  `crawler.py` (`crawl_site()` + `default_fetch` + `playwright_fallback`),
-  `cleaner.py` (trafilatura), `chunker.py`, `embeddings.py` (local BGE, hash fallback
-  when model unavailable), `store.py` (Chroma persistent, in-memory fallback),
-  `agent.py` (manual tool loop), `prompts.py` (exact system prompt — do not reword),
-  `dependencies.py` (singletons), `routes/{ingest,status,ask}.py`.
+- `backend/app/`: `main.py` (app+CORS+routers), `config.py` (env, `get_settings()` —
+  model ID centralized in `LLM_MODEL`, default `apodex/apodex-1.1-mini:free`),
+  `llm.py` (shared AsyncOpenAI client + error classification), `models.py`,
+  `security.py`, `crawler.py`, `cleaner.py`, `chunker.py`, `embeddings.py`,
+  `store.py`, `agent.py` (manual tool loop, reasoning stripping, empty-answer guard),
+  `prompts.py`, `dependencies.py`, `routes/{ingest,status,ask}.py`.
+- `backend/scripts/smoke_test_llm.py`: live tool-calling check (needs real key).
+- `backend/tests/`: pytest + pytest-asyncio (`test_llm_apodex.py` = mocked model tests).
 - `backend/tests/`: pytest + pytest-asyncio. Run: `python -m pytest tests/ -q` from `backend/`.
 - `frontend/`: Next.js 14 App Router. `app/page.tsx` is the whole UI; `lib/api.ts` is the
   API client (SSE over POST via fetch+ReadableStream). Typecheck: `node ./node_modules/typescript/bin/tsc --noEmit`

@@ -11,13 +11,17 @@ streamed answers grounded **only** in the site's real content, with source citat
 ## Run in under 5 minutes
 
 1. **Prereqs:** Docker + Docker Compose, and an [OpenRouter](https://openrouter.ai) API key
-   (any tool-calling model, e.g. `anthropic/claude-sonnet-4.5`).
+   (create one at https://openrouter.ai/keys — the free
+   `apodex/apodex-1.1-mini:free` model works without credits).
 2. **Configure:**
    ```bash
    cd siteask
    cp .env.example .env
    # edit .env and set OPENROUTER_API_KEY=sk-or-...
    ```
+   The key lives **only** in `siteask/.env` (loaded by Docker Compose into the
+   backend container). It is never baked into images, never sent to the browser,
+   and never logged. `.env` is gitignored — only `.env.example` (empty key) is committed.
 3. **Start:**
    ```bash
    docker compose up --build
@@ -78,16 +82,52 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 
 Tests:
 ```bash
-cd siteask/backend && python -m pytest tests/ -q   # 28 tests
+cd siteask/backend && python -m pytest tests/ -q   # 55 tests, all mocked (no key needed)
 cd siteask/frontend && npm run typecheck && npm run build
 ```
+
+LLM smoke test (needs a real key — checks the configured model supports tool calling):
+```bash
+cd siteask/backend
+# set OPENROUTER_API_KEY in siteask/.env or the environment first
+python scripts/smoke_test_llm.py   # prints PASS (+finish_reason) or FAIL (+error)
+```
+
+## Model: Apodex 1.1 Mini (free)
+
+Answer generation and agent reasoning run on `apodex/apodex-1.1-mini:free` via
+OpenRouter's OpenAI-compatible API. The model ID is centralized in
+`backend/app/config.py` (`Settings.LLM_MODEL` — the `:free` suffix is required;
+the paid variant without it must not be used) and a single shared `AsyncOpenAI`
+client is reused for all requests (`backend/app/llm.py`).
+
+Apodex is reasoning-first: reasoning fields and `<think>` blocks are stripped and
+**never** streamed to the browser — only final answer tokens become `token` events.
+An empty generation is retried once, then surfaces a friendly error (never an
+empty answer).
+
+**Switching models:** set `LLM_MODEL` in `siteask/.env` to any OpenRouter
+tool-calling model (e.g. `openai/gpt-oss-120b:free` or `poolside/laguna-m.1:free`
+as free fallbacks) and restart. No code changes needed.
+
+**Free-tier limitations:** the `:free` endpoint is rate-limited (~200 req/day,
+unconfirmed) and one question can use up to 5 LLM calls (4 tool rounds + final
+answer). On a 429 the API returns
+"The free model's limit was reached. Please try again later." Transient
+502/timeout errors are retried once; 400/401/402/403/404 are never retried and
+never leak secrets or stack traces.
+
+**Deploying the secret:** set `OPENROUTER_API_KEY` in your host's environment or
+secrets manager (compose reads `siteask/.env`). Do not put the key in
+`.env.example`, Dockerfiles, frontend code, or git.
 
 ## Configuration (.env)
 
 | Var | Default | Notes |
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | **required**, server refuses to start without it |
-| `LLM_MODEL` | `anthropic/claude-sonnet-4.5` | any OpenRouter tool-calling model |
+| `LLM_MODEL` | `apodex/apodex-1.1-mini:free` | OpenRouter tool-calling model; keep the `:free` suffix for the free variant |
+| `OPENROUTER_TIMEOUT_S` | `60` | per-request LLM timeout |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | local, no API key; pre-downloaded in Docker build |
 | `MAX_PAGES` / `MAX_DEPTH` | `30` / `2` | crawl budget |
 | `CACHE_TTL_HOURS` | `24` | re-ingest within TTL returns instantly |
