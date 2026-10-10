@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  @apply bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 antialiased;
+}
+
+.prose-siteask p {
+  @apply my-2 leading-relaxed;
+}
+.prose-siteask ul {
+  @apply list-disc pl-5 my-2 space-y-1;
+}
+.prose-siteask ol {
+  @apply list-decimal pl-5 my-2 space-y-1;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.typing-dot {
+  animation: blink 1.1s infinite;
+}

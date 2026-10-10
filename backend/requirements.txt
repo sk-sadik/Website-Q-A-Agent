@@ -1,0 +1,13 @@
+fastapi>=0.115
+uvicorn[standard]
+python-dotenv
+httpx
+trafilatura
+pydantic>=2.5.0
+pydantic-settings
+openai
+chromadb
+sentence-transformers
+playwright
+pytest
+pytest-asyncio
