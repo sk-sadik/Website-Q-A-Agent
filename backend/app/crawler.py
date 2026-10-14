@@ -152,7 +152,17 @@ async def default_fetch(url: str) -> Optional[FetchResult]:
 
 
 async def playwright_fallback(url: str) -> Optional[str]:
-    """Render JS page with Playwright Chromium. Returns HTML or None if unavailable."""
+    """Render JS page with Playwright Chromium. Returns HTML or None if unavailable.
+
+    The SSRF guard applies inside the browser too: blocked hosts are rejected
+    before navigation, sub-resource requests to blocked hosts are aborted,
+    and the final URL is re-checked after redirects.
+    """
+    from .security import hostname_is_blocked
+
+    if hostname_is_blocked(urlparse(url).hostname or ""):
+        logger.warning("Playwright blocked by SSRF guard: %s", url)
+        return None
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -162,8 +172,19 @@ async def playwright_fallback(url: str) -> Optional[str]:
             browser = await pw.chromium.launch(headless=True)
             try:
                 page = await browser.new_page(user_agent=USER_AGENT)
+
+                async def _ssrf_guard(route, request):
+                    if hostname_is_blocked(urlparse(request.url).hostname or ""):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
+                await page.route("**", _ssrf_guard)
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 await page.wait_for_timeout(1500)
+                if hostname_is_blocked(urlparse(page.url).hostname or ""):
+                    logger.warning("Playwright landed on blocked host: %s", page.url)
+                    return None
                 html = await page.content()
                 return html
             finally:

@@ -1,7 +1,7 @@
 """Crawler on a local mock site: limits, same-domain, robots, broken pages."""
 import pytest
 
-from app.crawler import crawl_site, extract_links, is_same_site
+from app.crawler import crawl_site, extract_links, is_same_site, playwright_fallback
 
 
 def _page(title, body, links=()):
@@ -91,3 +91,11 @@ def test_extract_links_skips_junk():
     html = ('<a href="/ok">a</a><a href="mailto:x@y">b</a>'
             '<a href="javascript:void(0)">c</a><a href="/f.pdf">d</a>')
     assert extract_links(html, "https://site.test/") == ["https://site.test/ok"]
+
+
+def test_playwright_fallback_enforces_ssrf_guard():
+    """Blocked hosts are rejected before any browser launches (no network)."""
+    import asyncio
+    assert asyncio.run(playwright_fallback("http://127.0.0.1/")) is None
+    assert asyncio.run(playwright_fallback("http://localhost:8000/")) is None
+    assert asyncio.run(playwright_fallback("http://169.254.169.254/")) is None
