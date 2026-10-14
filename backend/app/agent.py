@@ -291,8 +291,8 @@ class SiteAskAgent:
             # max rounds: force final streamed answer
             messages.append({"role": "user", "content": (
                 "Answer the original question now using ONLY the retrieved content above. "
-                "If it is not there, say exactly: \"I couldn't find this on the website\" "
-                "and suggest which page might have it.")})
+                "If it is not there, START your reply with exactly: \"I couldn't find this "
+                "on the website.\" You may add at most one short sentence after it.")})
             streamed_ok, final_events = await self._stream_final(messages)
             for ev in final_events:
                 yield ev
