@@ -82,9 +82,20 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 
 Tests:
 ```bash
-cd siteask/backend && python -m pytest tests/ -q   # 55 tests, all mocked (no key needed)
+cd siteask/backend && python -m pytest tests/ -q   # 56 tests, all mocked (no key needed)
 cd siteask/frontend && npm run typecheck && npm run build
 ```
+
+Full local run with real ML deps (no Docker needed, ~1 GB downloads: torch,
+BGE model, Chromium):
+```bash
+python -m venv .venv-real && .venv-real/Scripts/python -m pip install -r siteask/backend/requirements.txt
+.venv-real/Scripts/python -m playwright install chromium
+cd siteask/backend && ../../.venv-real/Scripts/python -m uvicorn app.main:app
+```
+Keep the venv outside the repo. Gotchas: the single uvicorn worker blocks
+while CPU-embedding a big crawl, so `/api/status` may time out until indexing
+finishes — just wait and retry; first BGE load downloads ~130 MB from HF Hub.
 
 LLM smoke test (needs a real key — checks the configured model supports tool calling):
 ```bash
@@ -110,12 +121,18 @@ empty answer).
 tool-calling model (e.g. `openai/gpt-oss-120b:free` or `poolside/laguna-m.1:free`
 as free fallbacks) and restart. No code changes needed.
 
-**Free-tier limitations:** the `:free` endpoint is rate-limited (~200 req/day,
-unconfirmed) and one question can use up to 5 LLM calls (4 tool rounds + final
-answer). On a 429 the API returns
+**Free-tier limitations:** the `:free` endpoint is rate-limited (observed:
+`free-models-per-day`, limit 50/day per key, plus shared-pool per-minute 429s).
+One question can use up to 5 LLM calls (4 tool rounds + final answer), so pace
+live testing ~30s apart. On a 429 the API returns
 "The free model's limit was reached. Please try again later." Transient
 502/timeout errors are retried once; 400/401/402/403/404 are never retried and
-never leak secrets or stack traces.
+never leak secrets or stack traces. Free models churn: on 2026-10-14
+`apodex/apodex-1.1-mini:free` briefly had zero OpenRouter endpoints, so live
+verification ran via `LLM_MODEL` override (`cohere/north-mini-code:free`) with
+the repo default untouched — check
+`https://openrouter.ai/api/v1/models` for current `:free` models with
+`"tools"` in `supported_parameters` if Apodex is unavailable.
 
 **Deploying the secret:** set `OPENROUTER_API_KEY` in your host's environment or
 secrets manager (compose reads `siteask/.env`). Do not put the key in
