@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 def site_id_from_url(url: str) -> str:
@@ -148,10 +151,14 @@ class ChromaStore:
                 for d, m, dist in zip(docs, metas, dists):
                     out.append({"url": (m or {}).get("url", ""), "title": (m or {}).get("title", ""),
                                 "text": d, "score": 1.0 / (1.0 + float(dist))})
+                logger.info("search site=%s collection=site_%s q=%.60s n=%d hits=%d top_dists=%s",
+                            site_id, site_id, query, n_results, len(out),
+                            [round(float(x), 3) for x in dists[:3]])
                 return out
             except Exception:
-                pass
-            return []
+                logger.exception("chroma query failed site=%s", site_id)
+                return []
+        mem = self._memory.get(site_id)
         mem = self._memory.get(site_id)
         if not mem or not mem["docs"]:
             return []
