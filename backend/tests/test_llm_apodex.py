@@ -336,6 +336,43 @@ def test_401_no_retry():
     assert events[-1]["type"] == "error"
 
 
+# ---------- fallback chain (404 only) ----------
+
+def test_fallback_chain_on_404_then_pinned(monkeypatch):
+    monkeypatch.setattr(get_settings(), "LLM_FALLBACK_MODELS", "fb-a:free,fb-b:free")
+    chunks = [{"url": "https://s.test/a", "title": "A", "text": "fact", "score": 1.0}]
+    script = [status_error(404), status_error(404),
+              FakeResp(FakeMsg("", [FakeCall("c1", "search_site", {"query": "q"})])),
+              FakeResp(FakeMsg("answered via fallback"))]
+    agent, client = make_agent(chunks, script)
+    assert agent.model == "apodex/apodex-1.1-mini:free"  # centralized default
+    events = collect(agent, "Q?")
+    models = [c["model"] for c in client.chat.completions.calls]
+    assert models[:3] == ["apodex/apodex-1.1-mini:free", "fb-a:free", "fb-b:free"]
+    assert agent.model == "fb-b:free"  # working fallback pinned for this question
+    assert events[-1] == {"type": "done"}
+    assert "answered via fallback" in "".join(
+        e.get("text", "") for e in events if e["type"] == "token")
+
+
+def test_fallback_exhausted_yields_unavailable(monkeypatch):
+    monkeypatch.setattr(get_settings(), "LLM_FALLBACK_MODELS", "fb-a:free")
+    agent, client = make_agent([], [status_error(404), status_error(404)])
+    events = collect(agent, "Q?")
+    assert len(client.chat.completions.calls) == 2
+    assert events[-1]["type"] == "error"
+    assert "unavailable" in events[-1]["message"].lower()
+
+
+def test_no_fallback_without_404(monkeypatch):
+    monkeypatch.setattr(get_settings(), "LLM_FALLBACK_MODELS", "fb-a:free")
+    agent, client = make_agent([], [status_error(502), status_error(502)])
+    events = collect(agent, "Q?")
+    models = {c["model"] for c in client.chat.completions.calls}
+    assert models == {"apodex/apodex-1.1-mini:free"}  # retry stays on primary
+    assert events[-1]["type"] == "error"
+
+
 # ---------- sources + grounding ----------
 
 def test_sources_tracked_from_tool_results():

@@ -121,6 +121,15 @@ empty answer).
 tool-calling model (e.g. `openai/gpt-oss-120b:free` or `poolside/laguna-m.1:free`
 as free fallbacks) and restart. No code changes needed.
 
+**Model fallback chain:** if the primary model answers 404 (no endpoints —
+common with `:free` models), the agent automatically tries each model in
+`LLM_FALLBACK_MODELS` (comma-separated, default
+`openai/gpt-oss-120b:free,poolside/laguna-m.1:free`) once per call and pins the
+first working one for the rest of the question. Only 404 triggers a fallback;
+all other errors keep their normal handling. Because free-tier model IDs churn,
+set `LLM_FALLBACK_MODELS` to IDs that currently exist (see
+`https://openrouter.ai/api/v1/models`, `"tools"` in `supported_parameters`).
+
 **Free-tier limitations:** the `:free` endpoint is rate-limited (observed:
 `free-models-per-day`, limit 50/day per key, plus shared-pool per-minute 429s).
 One question can use up to 5 LLM calls (4 tool rounds + final answer), so pace
@@ -144,6 +153,7 @@ secrets manager (compose reads `siteask/.env`). Do not put the key in
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | **required**, server refuses to start without it |
 | `LLM_MODEL` | `apodex/apodex-1.1-mini:free` | OpenRouter tool-calling model; keep the `:free` suffix for the free variant |
+| `LLM_FALLBACK_MODELS` | `openai/gpt-oss-120b:free,poolside/laguna-m.1:free` | Tried in order when the primary 404s; comma-separated |
 | `OPENROUTER_TIMEOUT_S` | `60` | per-request LLM timeout |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | local, no API key; pre-downloaded in Docker build |
 | `MAX_PAGES` / `MAX_DEPTH` | `30` / `2` | crawl budget |

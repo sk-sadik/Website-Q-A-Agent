@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     OPENROUTER_API_KEY: str = ""
     LLM_MODEL: str = "apodex/apodex-1.1-mini:free"
+    LLM_FALLBACK_MODELS: str = "openai/gpt-oss-120b:free,poolside/laguna-m.1:free"
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_TIMEOUT_S: float = 60.0
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"

@@ -162,31 +162,57 @@ class SiteAskAgent:
         return msgs
 
     async def _chat(self, messages: List[Dict], tools=None, stream: bool = False):
-        """One LLM call with at most one retry for transient errors only."""
+        """One LLM call per model in [primary, *fallbacks], one transient retry each.
+
+        Fallbacks are tried ONLY on 404 (model has no endpoints). Any other
+        failure keeps the previous behavior. A working fallback is pinned for
+        the rest of this question so later rounds don't re-hit the dead model.
+        """
+        from .config import get_settings
+
+        raw = get_settings().LLM_FALLBACK_MODELS or ""
+        chain = [self.model] + [m.strip() for m in raw.split(",")
+                                if m.strip() and m.strip() != self.model]
         client = self._client_or_create()
-        kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
+        base: Dict[str, Any] = {"messages": messages}
         if tools is not None:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        try:
-            if stream:
-                return await client.chat.completions.create(stream=True, **kwargs)
-            return await client.chat.completions.create(**kwargs)
-        except Exception as e:
-            user_msg, retryable = classify_error(e)
-            logger.warning("LLM call failed (%s, retryable=%s): %s",
-                           type(e).__name__, retryable, _short_error(e))
-            if not retryable:
-                raise _AgentError(user_msg)
-            await asyncio.sleep(1)
+            base["tools"] = tools
+            base["tool_choice"] = "auto"
+        for i, model in enumerate(chain):
+            kwargs = dict(base, model=model)
+            if i > 0:
+                logger.warning("primary model unavailable, trying fallback %s", model)
             try:
                 if stream:
-                    return await client.chat.completions.create(stream=True, **kwargs)
-                return await client.chat.completions.create(**kwargs)
-            except Exception as e2:
-                user_msg2, _ = classify_error(e2)
-                logger.warning("LLM retry failed (%s)", type(e2).__name__)
-                raise _AgentError(user_msg2)
+                    res = await client.chat.completions.create(stream=True, **kwargs)
+                else:
+                    res = await client.chat.completions.create(**kwargs)
+                if model != self.model:
+                    self.model = model
+                return res
+            except Exception as e:
+                if getattr(e, "status_code", None) == 404 and i + 1 < len(chain):
+                    logger.warning("model %s has no endpoints, trying next fallback", model)
+                    continue
+                user_msg, retryable = classify_error(e)
+                logger.warning("LLM call failed (%s, retryable=%s): %s",
+                               type(e).__name__, retryable, _short_error(e))
+                if not retryable:
+                    raise _AgentError(user_msg)
+                await asyncio.sleep(1)
+                try:
+                    if stream:
+                        res = await client.chat.completions.create(stream=True, **kwargs)
+                    else:
+                        res = await client.chat.completions.create(**kwargs)
+                    if model != self.model:
+                        self.model = model
+                    return res
+                except Exception as e2:
+                    user_msg2, _ = classify_error(e2)
+                    logger.warning("LLM retry failed (%s)", type(e2).__name__)
+                    raise _AgentError(user_msg2)
+        raise _AgentError("The configured AI model is unavailable. Please try again later.")
 
     def _extract_tool_calls(self, message) -> List[Dict[str, Any]]:
         """Safely parse tool calls; malformed args or unknown shapes are skipped."""
@@ -231,6 +257,13 @@ class SiteAskAgent:
                            "message": "The AI service returned a bad response. Please try again."}
                     return
                 calls = self._extract_tool_calls(msg)
+                try:
+                    finish = resp.choices[0].finish_reason
+                except Exception:
+                    finish = "?"
+                logger.info("agent round=%d site=%s finish=%s tools=%s content_len=%d",
+                            round_no, self.site_id, finish, [c["name"] for c in calls],
+                            len(message_text(msg)))
                 # Grounding fallback: first round with no tool call -> run search ourselves
                 if not calls and round_no == 0:
                     chunks = self.search_site(question)
@@ -273,6 +306,8 @@ class SiteAskAgent:
                     if c["name"] == "search_site":
                         q = str(c["args"].get("query", question))[:500]
                         chunks = self.search_site(q)
+                        logger.info("agent search site=%s q=%.60s hits=%d",
+                                    self.site_id, q, len(chunks))
                         yield {"type": "status", "message": f"Searching for: {q[:80]}"}
                         for ch in chunks:
                             used.setdefault(ch.get("url", ""), ch.get("title", ""))
@@ -294,6 +329,7 @@ class SiteAskAgent:
                 "If it is not there, START your reply with exactly: \"I couldn't find this "
                 "on the website.\" You may add at most one short sentence after it.")})
             streamed_ok, final_events = await self._stream_final(messages)
+            logger.info("agent done site=%s streamed_ok=%s", self.site_id, streamed_ok)
             for ev in final_events:
                 yield ev
             if not streamed_ok:  # error already yielded
