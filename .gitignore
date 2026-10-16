@@ -11,3 +11,4 @@ frontend/.next/
 .DS_Store
 tsconfig.tsbuildinfo
 .live*-chroma/
+*.err
