@@ -23,7 +23,7 @@ async def _run_crawl(site_id: str, url: str) -> None:
     s = get_settings()
     meta = store.get_site(site_id) or {}
     meta.update({"status": "crawling", "pages_crawled": 0, "pages_found": 1,
-                 "chunk_count": 0, "error": None, "url": url})
+                 "chunk_count": 0, "error": None, "error_code": None, "url": url})
     store.set_site(site_id, meta)
     try:
         result = await crawl_site(url, max_pages=s.MAX_PAGES, max_depth=s.MAX_DEPTH)
@@ -35,15 +35,17 @@ async def _run_crawl(site_id: str, url: str) -> None:
             meta.update({"status": "ready", "pages_crawled": result["pages_crawled"],
                          "pages_found": result["pages_found"],
                          "chunk_count": store.count(site_id), "crawled_at": time.time(),
-                         "error": None})
+                         "error": None, "error_code": None})
         else:
             meta.update({"status": "failed", "pages_crawled": result.get("pages_crawled", 0),
                          "pages_found": result.get("pages_found", 0),
-                         "error": result.get("error") or "Crawl failed"})
+                         "error": result.get("error") or "Crawl failed",
+                         "error_code": result.get("error_code") or "UNREACHABLE"})
         store.set_site(site_id, meta)
     except Exception as e:
         logger.exception("crawl crashed")
-        meta.update({"status": "failed", "error": f"Crawl crashed: {e}"})
+        meta.update({"status": "failed", "error": f"Crawl crashed: {e}",
+                     "error_code": "UNREACHABLE"})
         store.set_site(site_id, meta)
     finally:
         tasks().pop(site_id, None)
@@ -71,7 +73,7 @@ async def ingest(body: IngestRequest, request: Request, background: BackgroundTa
     store.set_site(site_id, {"url": url, "status": "queued", "pages_crawled": 0,
                              "pages_found": 1, "chunk_count": 0,
                              "crawled_at": (existing or {}).get("crawled_at", 0),
-                             "error": None})
+                             "error": None, "error_code": None})
 
     async def runner():
         async with task_lock(site_id):

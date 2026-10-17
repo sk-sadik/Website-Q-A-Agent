@@ -30,6 +30,7 @@ class StatusResponse(BaseModel):
     pages_found: int = 0
     chunk_count: int = 0
     error: Optional[str] = None
+    error_code: Optional[str] = None  # LOGIN_REQUIRED | EMPTY_CONTENT | UNREACHABLE
 
 
 class HistoryTurn(BaseModel):

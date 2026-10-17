@@ -20,4 +20,5 @@ async def status(site_id: str):
         pages_found=meta.get("pages_found", 0),
         chunk_count=meta.get("chunk_count", 0),
         error=meta.get("error"),
+        error_code=meta.get("error_code"),
     )
