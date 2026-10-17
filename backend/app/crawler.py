@@ -200,6 +200,9 @@ class CrawlStats:
         self.pages_found = 1
         self.chunks: List[Dict] = []
         self.error: Optional[str] = None
+        self.error_code: Optional[str] = None
+        self.login_pages = 0
+        self.fetched_any = False
 
 
 async def crawl_site(
@@ -293,21 +296,33 @@ async def crawl_site(
                         failed_start = True
                 return []
             _st, final_url, _ct, html = res
-            # JS fallback when almost no text
+            stats.fetched_any = True
+            from .cleaner import is_login_page
+
             extracted = extract_main_content(html, final_url)
-            if extracted is None and js is not None:
+            thin = extracted is None or len(extracted[1]) < 200
+            login_only = is_login_page(html) and thin
+            # JS fallback when extraction is empty or thin (< ~200 chars),
+            # but not for obvious login portals (rendering won't add content).
+            if thin and not login_only and js is not None:
                 try:
                     rendered = await js(final_url)
                 except Exception:
                     rendered = None
                 if rendered:
-                    extracted = extract_main_content(rendered, final_url)
+                    richer = extract_main_content(rendered, final_url)
+                    if richer is not None and (extracted is None or len(richer[1]) > len(extracted[1])):
+                        extracted = richer
             async with lock:
                 visited.add(url)
                 if final_url != url:
                     visited.add(final_url)
             new_links: List[Tuple[str, int]] = []
-            if extracted is not None:
+            if login_only:
+                async with lock:
+                    stats.login_pages += 1
+                logger.info("Login-only page, nothing to index: %s", final_url)
+            elif extracted is not None:
                 title, text = extracted
                 for ch in chunk_text(text, final_url, title):
                     stats.chunks.append(ch)
@@ -348,12 +363,28 @@ async def crawl_site(
             break
 
     if stats.pages_crawled == 0:
-        stats.error = (
-            f"Could not extract content from the start page ({start}). "
-            "The site may be unreachable, JS-only, or blocking crawlers."
-            if failed_start or True else "Crawl produced no content."
-        )
+        if stats.login_pages > 0:
+            stats.error_code = "LOGIN_REQUIRED"
+            stats.error = (
+                f"The start page ({start}) is a login portal with no public "
+                f"content ({stats.login_pages} login page(s) seen). "
+                "Try the organization's public website instead."
+            )
+        elif stats.fetched_any:
+            stats.error_code = "EMPTY_CONTENT"
+            stats.error = (
+                f"Pages were reachable but yielded no readable text ({start}). "
+                "The site may be JS-only or blocking crawlers."
+            )
+        else:
+            stats.error_code = "UNREACHABLE"
+            stats.error = (
+                f"Could not reach the start page ({start}). "
+                "The site may be unreachable or blocking crawlers."
+            )
         return {"status": "failed", "pages_crawled": 0, "pages_found": stats.pages_found,
-                "chunks": [], "error": stats.error}
+                "chunks": [], "error": stats.error, "error_code": stats.error_code,
+                "login_pages": stats.login_pages}
     return {"status": "done", "pages_crawled": stats.pages_crawled,
-            "pages_found": stats.pages_found, "chunks": stats.chunks, "error": None}
+            "pages_found": stats.pages_found, "chunks": stats.chunks, "error": None,
+            "error_code": None, "login_pages": stats.login_pages}

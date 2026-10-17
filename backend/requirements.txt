@@ -3,6 +3,7 @@ uvicorn[standard]
 python-dotenv
 httpx
 trafilatura
+beautifulsoup4
 pydantic>=2.5.0
 pydantic-settings
 openai
