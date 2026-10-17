@@ -15,11 +15,10 @@ streamed answers grounded **only** in the site's real content, with source citat
    `apodex/apodex-1.1-mini:free` model works without credits).
 2. **Configure:**
    ```bash
-   cd siteask
    cp .env.example .env
    # edit .env and set OPENROUTER_API_KEY=sk-or-...
    ```
-   The key lives **only** in `siteask/.env` (loaded by Docker Compose into the
+   The key lives **only** in `.env` at the repo root (loaded by Docker Compose into the
    backend container). It is never baked into images, never sent to the browser,
    and never logged. `.env` is gitignored — only `.env.example` (empty key) is committed.
 3. **Start:**
@@ -67,7 +66,7 @@ link-local, multicast and reserved ranges on every redirect hop).
 
 Backend:
 ```bash
-cd siteask/backend
+cd backend
 pip install -r requirements.txt
 export OPENROUTER_API_KEY=sk-or-...   # required; server fails fast without it
 uvicorn app.main:app --reload
@@ -75,23 +74,23 @@ uvicorn app.main:app --reload
 
 Frontend:
 ```bash
-cd siteask/frontend
+cd frontend
 npm install
 NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
 Tests:
 ```bash
-cd siteask/backend && python -m pytest tests/ -q   # 56 tests, all mocked (no key needed)
-cd siteask/frontend && npm run typecheck && npm run build
+cd backend && python -m pytest tests/ -q   # 68 tests, all mocked (no key needed)
+cd frontend && npm run typecheck && npm run build
 ```
 
 Full local run with real ML deps (no Docker needed, ~1 GB downloads: torch,
 BGE model, Chromium):
 ```bash
-python -m venv .venv-real && .venv-real/Scripts/python -m pip install -r siteask/backend/requirements.txt
-.venv-real/Scripts/python -m playwright install chromium
-cd siteask/backend && ../../.venv-real/Scripts/python -m uvicorn app.main:app
+python -m venv ../.venv-real && ../.venv-real/Scripts/python -m pip install -r backend/requirements.txt
+../.venv-real/Scripts/python -m playwright install chromium
+cd backend && ../../.venv-real/Scripts/python -m uvicorn app.main:app
 ```
 Keep the venv outside the repo. Gotchas: the single uvicorn worker blocks
 while CPU-embedding a big crawl, so `/api/status` may time out until indexing
@@ -99,8 +98,8 @@ finishes — just wait and retry; first BGE load downloads ~130 MB from HF Hub.
 
 LLM smoke test (needs a real key — checks the configured model supports tool calling):
 ```bash
-cd siteask/backend
-# set OPENROUTER_API_KEY in siteask/.env or the environment first
+cd backend
+# set OPENROUTER_API_KEY in .env or the environment first
 python scripts/smoke_test_llm.py   # prints PASS (+finish_reason) or FAIL (+error)
 ```
 
@@ -117,7 +116,7 @@ Apodex is reasoning-first: reasoning fields and `<think>` blocks are stripped an
 An empty generation is retried once, then surfaces a friendly error (never an
 empty answer).
 
-**Switching models:** set `LLM_MODEL` in `siteask/.env` to any OpenRouter
+**Switching models:** set `LLM_MODEL` in `.env` to any OpenRouter
 tool-calling model (e.g. `openai/gpt-oss-120b:free` or `poolside/laguna-m.1:free`
 as free fallbacks) and restart. No code changes needed.
 
@@ -144,8 +143,24 @@ the repo default untouched — check
 `"tools"` in `supported_parameters` if Apodex is unavailable.
 
 **Deploying the secret:** set `OPENROUTER_API_KEY` in your host's environment or
-secrets manager (compose reads `siteask/.env`). Do not put the key in
+secrets manager (compose reads `.env` at the repo root). Do not put the key in
 `.env.example`, Dockerfiles, frontend code, or git.
+
+## Known limitations
+
+- **Login portals can't be indexed.** Sites whose only content is a login or
+  forgot-password form (e.g. an ERP) are reported as `LOGIN_REQUIRED` rather than
+  `ready` — there is nothing public to answer from. Use the organization's public
+  website instead.
+- **JS-heavy sites are slower.** Pages that render their text with JavaScript force
+  a Playwright (headless Chromium) fallback, which is much slower than the default
+  httpx fetch. Very large JS-only sites may hit the crawl budget before indexing much.
+- **Crawl limits.** Each site is capped at `MAX_PAGES` (default 30) and `MAX_DEPTH`
+  (default 2) to keep crawls polite and fast. Large sites (thousands of pages) are
+  only partially indexed, so niche facts deep in the site may not be retrievable.
+- **Free-tier model limits.** The `:free` OpenRouter models are rate-limited
+  (~50 requests/day per key plus shared-pool 429s) and their IDs churn over time.
+  Expect occasional slowdowns or the need to switch `LLM_MODEL`/`LLM_FALLBACK_MODELS`.
 
 ## Configuration (.env)
 
