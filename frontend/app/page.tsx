@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { ApiError, askStream, fetchStatus, ingestSite, isValidUrlInput } from "@/lib/api";
 import type { ChatMessage, SiteStatus, Source, StatusResponse } from "@/lib/types";
+import { errorHeadline } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button, Card, Input } from "@/components/ui";
 
@@ -24,6 +25,7 @@ interface SiteState {
   status: StatusResponse | null;
   phase: Phase;
   error: string | null;
+  errorCode: string | null;
 }
 
 function themeInit(): "light" | "dark" {
@@ -38,7 +40,8 @@ export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [urlInput, setUrlInput] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
-  const [site, setSite] = useState<SiteState>({ url: "", siteId: null, status: null, phase: "empty", error: null });
+  const [site, setSite] = useState<SiteState>({ url: "", siteId: null, status: null,
+phase: "empty", error: null, errorCode: null });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -88,11 +91,11 @@ export default function Home() {
   const pollStatus = useCallback(async (siteId: string) => {
     try {
       const s = await fetchStatus(siteId);
-      setSite((prev) => ({ ...prev, status: s, phase: s.status === "ready" ? "ready" : "crawling", error: s.error ?? null }));
+      setSite((prev) => ({ ...prev, status: s, phase: s.status === "ready" ? "ready" : "crawling", error: s.error ?? null, errorCode: s.error_code ?? null }));
       if (s.status === "ready" || s.status === "failed") {
         stopPolling();
         if (s.status === "failed") {
-          setSite((prev) => ({ ...prev, phase: "error", error: s.error || "Crawling failed." }));
+          setSite((prev) => ({ ...prev, phase: "error", error: s.error || "Crawling failed.", errorCode: s.error_code ?? null }));
         }
       }
     } catch (e) {
@@ -111,7 +114,7 @@ export default function Home() {
     stopPolling();
     abortRef.current?.abort();
     setAsking(false);
-    setSite({ url: url.trim(), siteId: null, status: null, phase: "loading-site", error: null });
+    setSite({ url: url.trim(), siteId: null, status: null, phase: "loading-site", error: null, errorCode: null });
     try {
       const r = await ingestSite(url.trim(), refresh);
       setSite((prev) => ({ ...prev, siteId: r.site_id }));
@@ -253,7 +256,7 @@ export default function Home() {
         {site.phase === "error" && (
           <Card className="p-5 border-red-300 dark:border-red-800">
             <p className="text-sm font-medium text-red-700 dark:text-red-300">Couldn&apos;t analyze that site</p>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{site.error}</p>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{errorHeadline(site.errorCode, site.error)}</p>
             <div className="mt-3">
               <Button variant="outline" onClick={() => startIngest(site.url || urlInput)}>Retry</Button>
             </div>
