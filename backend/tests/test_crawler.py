@@ -99,3 +99,49 @@ def test_playwright_fallback_enforces_ssrf_guard():
     assert asyncio.run(playwright_fallback("http://127.0.0.1/")) is None
     assert asyncio.run(playwright_fallback("http://localhost:8000/")) is None
     assert asyncio.run(playwright_fallback("http://169.254.169.254/")) is None
+
+
+LOGIN_HTML = """<html><head><title>ERP Login</title></head><body>
+<h1>Sign in</h1><p>Please enter your credentials to continue</p>
+<form action="/login" method="post">
+<input type="text" name="username" placeholder="Username">
+<input type="password" name="password" placeholder="Password">
+<button type="submit">Login</button></form></body></html>"""
+
+
+def test_login_only_page_reports_login_required():
+    """Password form + short text -> failed with LOGIN_REQUIRED, nothing indexed."""
+    import asyncio
+    from app.cleaner import extract_main_content, is_login_page
+
+    assert is_login_page(LOGIN_HTML)
+    assert not is_login_page("<html><body><p>Hello world</p></body></html>")
+    entry = (200, "", "text/html", LOGIN_HTML)
+    r = asyncio.run(crawl_site("https://erp.test/", max_pages=10, max_depth=0,
+                               polite_delay=0,
+                               fetch_fn=make_fetch({"https://erp.test/": entry}),
+                               robots_txt="", js_fallback=None))
+    assert r["status"] == "failed"
+    assert r["error_code"] == "LOGIN_REQUIRED"
+    assert r["pages_crawled"] == 0
+    assert "login" in (r["error"] or "").lower()
+
+
+def test_thin_page_triggers_playwright_fallback():
+    """Extracted text under ~200 chars must attempt the JS fallback."""
+    import asyncio
+    thin = _page("Thin", "word " * 30, [])  # ~150 chars, no password form
+    rich = _page("Rich", LONG, [])
+    calls = []
+
+    async def fake_js(url):
+        calls.append(url)
+        return rich[3]
+
+    r = asyncio.run(crawl_site("https://js.test/", max_pages=10, max_depth=0,
+                               polite_delay=0,
+                               fetch_fn=make_fetch({"https://js.test/": thin}),
+                               robots_txt="", js_fallback=fake_js))
+    assert calls == ["https://js.test/"]
+    assert r["status"] == "done"
+    assert r["pages_crawled"] == 1
