@@ -26,6 +26,13 @@ from .security import (
 logger = logging.getLogger(__name__)
 
 USER_AGENT = "SiteAsk/1.0 (+research crawler; contact: siteask)"
+
+# If every indexed page is login-related and total content is tiny, the site is a
+# login portal (not a real site) -> report LOGIN_REQUIRED instead of "ready".
+LOGIN_ONLY_MAX_CHARS = 1000
+LOGIN_URL_RE = re.compile(
+    r"(log[-_]?in|sign[-_]?in|forgot|reset[-_]?pass|auth|password|session)", re.IGNORECASE
+)
 SKIP_EXT = re.compile(
     r"\.(pdf|docx?|xlsx?|pptx?|zip|gz|tar|rar|7z|mp3|mp4|avi|mov|mkv|jpg|jpeg|png|gif|svg|webp|bmp|ico|css|js|mjs|json|xml|exe|dmg|woff2?|ttf|eot)$",
     re.IGNORECASE,
@@ -69,6 +76,14 @@ def should_skip(url: str) -> bool:
     if SKIP_EXT.search(urlparse(url).path or ""):
         return True
     return False
+
+
+def _is_login_url(url: str) -> bool:
+    """True when the URL path looks like a login/forgot-password/session page."""
+    try:
+        return bool(LOGIN_URL_RE.search(urlparse(url).path or ""))
+    except Exception:
+        return False
 
 
 def extract_links(html: str, base_url: str) -> List[str]:
@@ -203,6 +218,8 @@ class CrawlStats:
         self.error_code: Optional[str] = None
         self.login_pages = 0
         self.fetched_any = False
+        self.indexed_chars = 0
+        self.login_content_pages = 0
 
 
 async def crawl_site(
@@ -328,6 +345,9 @@ async def crawl_site(
                     stats.chunks.append(ch)
                 async with lock:
                     stats.pages_crawled += 1
+                    stats.indexed_chars += len(text)
+                    if _is_login_url(final_url) or is_login_page(html):
+                        stats.login_content_pages += 1
             else:
                 # page fetched but unusable — still counts as attempted, not crawled
                 logger.info("No usable text: %s", final_url)
@@ -385,6 +405,19 @@ async def crawl_site(
         return {"status": "failed", "pages_crawled": 0, "pages_found": stats.pages_found,
                 "chunks": [], "error": stats.error, "error_code": stats.error_code,
                 "login_pages": stats.login_pages}
+    # Every indexed page is login-related and there is barely any content: this is a
+    # login portal (e.g. ERP), not a real site -> LOGIN_REQUIRED, not "ready".
+    if (stats.login_content_pages == stats.pages_crawled
+            and stats.indexed_chars < LOGIN_ONLY_MAX_CHARS):
+        stats.error_code = "LOGIN_REQUIRED"
+        stats.error = (
+            f"The site ({start}) only exposes login/forgot-password pages "
+            f"({stats.indexed_chars} chars of content). "
+            "Try the organization's public website instead."
+        )
+        return {"status": "failed", "pages_crawled": stats.pages_crawled,
+                "pages_found": stats.pages_found, "chunks": [], "error": stats.error,
+                "error_code": stats.error_code, "login_pages": stats.login_pages}
     return {"status": "done", "pages_crawled": stats.pages_crawled,
             "pages_found": stats.pages_found, "chunks": stats.chunks, "error": None,
             "error_code": None, "login_pages": stats.login_pages}

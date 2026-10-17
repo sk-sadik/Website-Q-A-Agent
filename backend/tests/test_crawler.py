@@ -127,6 +127,53 @@ def test_login_only_page_reports_login_required():
     assert "login" in (r["error"] or "").lower()
 
 
+def test_login_portal_with_forgot_password_reports_login_required():
+    """Login + forgot-password pages only (thin content) -> LOGIN_REQUIRED, not ready.
+
+    Reproduces erp.lbrce.ac.in: start page is a login form, the only other page is
+    a forgot-password form. With no real content the site must NOT be marked ready.
+    """
+    import asyncio
+    login = ("<html><head><title>ERP Login</title></head><body>"
+             "<h1>Sign in</h1><form action=\"/login\" method=\"post\">"
+             "<input type=\"password\" name=\"password\"></form>"
+             "<a href=\"/login/ForgotPassword.aspx\">Forgot password?</a>"
+             "</body></html>")
+    forgot = ("<html><head><title>Forgot Password</title></head><body>"
+              "<h1>Reset your password</h1><p>"
+              + ("Enter your registered email address to reset. " * 8)
+              + "</p><form><input type=\"text\" name=\"email\"></form></body></html>")
+    pages = {
+        "https://erp.test/": (200, "", "text/html", login),
+        "https://erp.test/login/ForgotPassword.aspx": (200, "", "text/html", forgot),
+    }
+    r = asyncio.run(crawl_site("https://erp.test/", max_pages=10, max_depth=1,
+                               polite_delay=0, fetch_fn=make_fetch(pages),
+                               robots_txt="", js_fallback=None))
+    assert r["status"] == "failed"
+    assert r["error_code"] == "LOGIN_REQUIRED"
+    assert "login" in (r["error"] or "").lower()
+
+
+def test_site_with_real_content_stays_ready_despite_login_page():
+    """A real site that also has a login page must still be indexed as done."""
+    import asyncio
+    login = ("<html><head><title>Login</title></head><body>"
+             "<form><input type=\"password\" name=\"p\"></form>"
+             "<a href=\"/about\">About</a></body></html>")
+    about = _page("About", LONG, [])
+    pages = {
+        "https://real.test/": (200, "", "text/html", login),
+        "https://real.test/about": about,
+    }
+    r = asyncio.run(crawl_site("https://real.test/", max_pages=10, max_depth=1,
+                               polite_delay=0, fetch_fn=make_fetch(pages),
+                               robots_txt="", js_fallback=None))
+    assert r["status"] == "done"
+    assert r["pages_crawled"] >= 1
+    assert r["error_code"] is None
+
+
 def test_thin_page_triggers_playwright_fallback():
     """Extracted text under ~200 chars must attempt the JS fallback."""
     import asyncio
